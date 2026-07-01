@@ -1,15 +1,12 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { signIn } from "aws-amplify/auth";
-import {
-  Mail,
-  Lock,
-  Eye,
-  EyeOff,
-  ArrowRight,
-} from "lucide-react";
+import { Mail, ArrowRight } from "lucide-react";
 
 import AuthLayout from "../components/auth/AuthLayout";
+import AuthInput from "../components/auth/AuthInput";
+import PasswordInput from "../components/auth/PasswordInput";
+import SocialButton from "../components/auth/SocialButton";
 
 export default function Login() {
   const navigate = useNavigate();
@@ -17,10 +14,7 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  const [showPassword, setShowPassword] = useState(false);
-
   const [loading, setLoading] = useState(false);
-
   const [error, setError] = useState("");
 
   async function handleLogin(e) {
@@ -30,19 +24,40 @@ export default function Login() {
     setError("");
 
     try {
-      await signIn({
-        username: email,
-        password,
-      });
+      const result = await signIn({ username: email, password });
 
-      navigate("/dashboard");
+      if (result.isSignedIn) {
+        navigate("/dashboard", { replace: true });
+        return;
+      }
+
+      switch (result.nextStep?.signInStep) {
+        case "CONFIRM_SIGN_UP":
+          navigate("/register", { state: { email, resumeConfirm: true } });
+          break;
+
+        case "RESET_PASSWORD":
+          navigate("/forgot-password", { state: { email } });
+          break;
+
+        case "DONE":
+          navigate("/dashboard", { replace: true });
+          break;
+
+        default:
+          setError("Additional authentication is required. Please follow the next step.");
+      }
     } catch (err) {
       console.error(err);
 
-      setError(
-        err.message ||
-          "Unable to login. Please check your credentials."
-      );
+      // Common gotcha: if a stale session already exists, Amplify throws
+      // instead of returning isSignedIn: true. Treat it as a success case.
+      if (err.name === "UserAlreadyAuthenticatedException") {
+        navigate("/dashboard", { replace: true });
+        return;
+      }
+
+      setError(err.message || err.name || "Unable to login. Please check your credentials.");
     } finally {
       setLoading(false);
     }
@@ -56,95 +71,38 @@ export default function Login() {
       footerLink="/register"
       footerLabel="Sign Up"
     >
-      <form
-        onSubmit={handleLogin}
-        className="space-y-6"
-      >
+      <form onSubmit={handleLogin} className="space-y-6" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
         <div>
-
           <label className="block mb-2 text-sm font-semibold text-slate-700">
             Email Address
           </label>
-
-          <div className="relative">
-
-            <Mail
-              size={18}
-              className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"
-            />
-
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) =>
-                setEmail(e.target.value)
-              }
-              placeholder="john@example.com"
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 py-4 pl-12 pr-4 outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-            />
-
-          </div>
-
+          <AuthInput
+            icon={Mail}
+            type="email"
+            required
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="john@example.com"
+          />
         </div>
 
         <div>
-
           <label className="block mb-2 text-sm font-semibold text-slate-700">
             Password
           </label>
-
-          <div className="relative">
-
-            <Lock
-              size={18}
-              className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"
-            />
-
-            <input
-              type={
-                showPassword
-                  ? "text"
-                  : "password"
-              }
-              required
-              value={password}
-              onChange={(e) =>
-                setPassword(e.target.value)
-              }
-              placeholder="••••••••"
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 py-4 pl-12 pr-14 outline-none transition focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
-            />
-
-            <button
-              type="button"
-              onClick={() =>
-                setShowPassword(!showPassword)
-              }
-              className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400"
-            >
-              {showPassword ? (
-                <EyeOff size={20} />
-              ) : (
-                <Eye size={20} />
-              )}
-            </button>
-
-          </div>
-
+          <PasswordInput
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
         </div>
 
         <div className="flex items-center justify-between">
-
-          <label className="flex items-center gap-2 text-sm text-slate-600">
-
-            <input
-              type="checkbox"
-              className="rounded"
-            />
-
+          <label
+            className="text-sm text-slate-600"
+            style={{ display: "flex", alignItems: "center", gap: "8px" }}
+          >
+            <input type="checkbox" className="rounded" style={{ height: "16px", width: "16px" }} />
             Remember Me
-
           </label>
 
           <Link
@@ -153,7 +111,6 @@ export default function Login() {
           >
             Forgot Password?
           </Link>
-
         </div>
 
         {error && (
@@ -166,44 +123,24 @@ export default function Login() {
           disabled={loading}
           className="flex w-full items-center justify-center gap-3 rounded-2xl bg-blue-600 py-4 text-lg font-semibold text-white transition hover:bg-blue-700 disabled:opacity-60"
         >
-          {loading
-            ? "Signing In..."
-            : "Sign In"}
-
+          {loading ? "Signing In..." : "Sign In"}
           <ArrowRight size={18} />
         </button>
 
-        <div className="relative">
-
-          <div className="absolute inset-0 flex items-center">
-
-            <div className="w-full border-t border-slate-200"></div>
-
-          </div>
-
-          <div className="relative flex justify-center">
-
-            <span className="bg-white px-4 text-sm text-slate-400">
-              OR
-            </span>
-
-          </div>
-
+        <div style={{ display: "flex", alignItems: "center", margin: "8px 0" }}>
+          <div style={{ flex: 1, height: "1px", backgroundColor: "#e2e8f0" }}></div>
+          <span style={{ padding: "0 16px", fontSize: "14px", color: "#94a3b8" }}>OR</span>
+          <div style={{ flex: 1, height: "1px", backgroundColor: "#e2e8f0" }}></div>
         </div>
 
-        <button
-          type="button"
-          className="flex w-full items-center justify-center gap-3 rounded-2xl border border-slate-200 bg-white py-4 font-semibold transition hover:bg-slate-50"
-        >
+        <SocialButton>
           <img
             src="https://www.svgrepo.com/show/475656/google-color.svg"
             alt="Google"
             className="h-6 w-6"
           />
-
           Continue with Google
-        </button>
-
+        </SocialButton>
       </form>
     </AuthLayout>
   );
