@@ -1,0 +1,13 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "url-shortener"
+resolve_s3 = true
+s3_prefix = "url-shortener"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "StageName=\"prod\" FrontendDomainName=\"\" CertificateArn=\"\" HostedZoneId=\"\""
+image_repositories = []
+
+[default.global.parameters]
+region = "ap-south-1"
