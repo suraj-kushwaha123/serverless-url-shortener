@@ -1,0 +1,357 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless URL shortener with click analytics and observability.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+  FrontendDomainName:
+    Type: String
+    Default: ""
+    Description: Optional custom domain for the CloudFront hosted frontend.
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: Optional ACM certificate ARN in us-east-1 for the CloudFront domain.
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: Optional Route 53 hosted zone id for the frontend domain.
+
+Conditions:
+  HasCustomDomain: !And
+    - !Not [!Equals [!Ref FrontendDomainName, ""]]
+    - !Not [!Equals [!Ref CertificateArn, ""]]
+  HasRoute53Record: !And
+    - !Condition HasCustomDomain
+    - !Not [!Equals [!Ref HostedZoneId, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Handler: app.lambda_handler
+    CodeUri: src/
+    Timeout: 10
+    MemorySize: 256
+    Tracing: Active
+    Environment:
+      Variables:
+        URLS_TABLE: !Ref UrlsTable
+        CLICKS_TABLE: !Ref ClicksTable
+        CLICK_EVENTS_QUEUE_URL: !Ref ClickEventsQueue
+        ANALYTICS_BUCKET: !Ref AnalyticsBucket
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  Api:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref StageName
+      TracingEnabled: true
+      Cors:
+        AllowMethods: "'GET,POST,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  UrlsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: shortCode
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: shortCode
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: UserIdIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  ClicksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: shortCode
+          AttributeType: S
+        - AttributeName: clickedAt
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: shortCode
+          KeyType: HASH
+        - AttributeName: clickedAt
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: UserIdClickedAtIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+            - AttributeName: clickedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+  ClickEventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 1209600
+
+  AnalyticsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ShortenFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: shorten.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UrlsTable
+      Events:
+        Shorten:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /shorten
+            Method: post
+
+  ListUrlsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: list_urls.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UrlsTable
+      Events:
+        ListUrls:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /urls
+            Method: get
+
+  DeleteUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: delete_url.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UrlsTable
+      Events:
+        DeleteUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /url/{shortCode}
+            Method: delete
+
+  RedirectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: redirect.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UrlsTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt ClickEventsQueue.QueueName
+      Events:
+        Redirect:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /{shortCode}
+            Method: get
+            Auth:
+              Authorizer: NONE
+
+  AnalyticsIngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: analytics_ingest.lambda_handler
+      Timeout: 30
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ClicksTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UrlsTable
+        - S3CrudPolicy:
+            BucketName: !Ref AnalyticsBucket
+      Events:
+        ClickEvents:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ClickEventsQueue.Arn
+            BatchSize: 10
+
+  AnalyticsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: analytics.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ClicksTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref UrlsTable
+      Events:
+        Analytics:
+          Type: Api
+          Properties:
+            RestApiId: !Ref Api
+            Path: /analytics
+            Method: get
+
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-analytics"
+      RecursiveDeleteOption: true
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${AnalyticsBucket}/athena-results/"
+
+  AnalyticsGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "${AWS::StackName}_analytics"
+
+  AnalyticsGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref AnalyticsGlueDatabase
+      TableInput:
+        Name: click_events
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          projection.enabled: true
+          projection.year.type: integer
+          projection.year.range: "2024,2035"
+          projection.month.type: integer
+          projection.month.range: "1,12"
+          projection.month.digits: "2"
+          projection.day.type: integer
+          projection.day.range: "1,31"
+          projection.day.digits: "2"
+          storage.location.template: !Sub "s3://${AnalyticsBucket}/click-events/year=${!year}/month=${!month}/day=${!day}/"
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Location: !Sub "s3://${AnalyticsBucket}/click-events/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+          Columns:
+            - Name: shortCode
+              Type: string
+            - Name: longUrl
+              Type: string
+            - Name: userId
+              Type: string
+            - Name: clickedAt
+              Type: string
+            - Name: ipAddress
+              Type: string
+            - Name: userAgent
+              Type: string
+            - Name: referrer
+              Type: string
+            - Name: clickId
+              Type: string
+            - Name: clickedDate
+              Type: string
+            - Name: device
+              Type: string
+            - Name: browser
+              Type: string
+            - Name: source
+              Type: string
+            - Name: country
+              Type: string
+
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Lambda errors detected in the URL shortener stack.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  ApiBaseUrl:
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  AnalyticsBucketName:
+    Value: !Ref AnalyticsBucket
