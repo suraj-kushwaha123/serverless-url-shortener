@@ -80,7 +80,7 @@ export default function Sidebar() {
               ShortLink
             </h1>
             <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-cyan-500/80">
-              Nexus Terminal
+              Terminal
             </p>
           </div>
         </Link>
