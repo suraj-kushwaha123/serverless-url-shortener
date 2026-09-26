@@ -118,7 +118,7 @@ export default function Dashboard() {
               <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-cyan-300">Terminal Ready</span>
             </div>
             <h1 className="text-4xl font-black tracking-tight text-white sm:text-5xl neon-text-cyan">
-              Nexus Dashboard
+              Dashboard
             </h1>
             <p className="mt-2 text-sm font-medium text-slate-400">
               Establish new vectors, monitor traffic, and analyze routing telemetry.
